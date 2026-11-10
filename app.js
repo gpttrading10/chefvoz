@@ -19,7 +19,84 @@ function showKitchenStatus(message){
   const status = $('#modal[open] #kitchen-status');
   if (status) status.textContent = message;
 }
-function cook(id,index){currentId=id;stepIndex=index;const r=db.recipes.find(r=>r.id===id);openOrUpdate(head(r.title)+`<div class="modal-content"><div class="step-progress">PASO ${index+1} DE ${r.steps.length}</div><div class="step">${esc(r.steps[index])}</div><div class="actions"><button ${index===0?'disabled':''} onclick="cook('${id}',${index-1})">← Anterior</button><button class="primary" onclick="${index===r.steps.length-1?'closeModal();toast(\'¡A disfrutar!\')':`cook('${id}',${index+1})`}">${index===r.steps.length-1?'Terminar ✓':'Siguiente →'}</button><button onclick="speak()">◖ Escuchar paso</button><button onclick="listen()">♩ Comando de voz</button></div><p class="note">Comandos: «siguiente», «anterior», «repetir». La disponibilidad del micrófono depende del navegador. Los botones siempre están disponibles.</p><div id="kitchen-status" role="status" aria-live="polite" aria-atomic="true"></div></div>`)}function speak(){if(!('speechSynthesis'in window)){showKitchenStatus('Lectura de voz no disponible en este navegador');return}speechSynthesis.cancel();let s=new SpeechSynthesisUtterance(db.recipes.find(r=>r.id===currentId).steps[stepIndex]);s.lang='es-ES';speechSynthesis.speak(s)}function listen(){const SR=window.SpeechRecognition||window.webkitSpeechRecognition;if(!SR){showKitchenStatus('Usa los botones: este navegador no admite reconocimiento de voz');return}let sr=new SR();sr.lang='es-ES';sr.onresult=e=>{const t=e.results[0][0].transcript.toLowerCase(),r=db.recipes.find(r=>r.id===currentId);if(t.includes('siguiente'))cook(currentId,Math.min(r.steps.length-1,stepIndex+1));else if(t.includes('anterior'))cook(currentId,Math.max(0,stepIndex-1));else speak()};sr.onerror=()=>showKitchenStatus('No se pudo escuchar. Usa los botones de pantalla.');sr.start();showKitchenStatus('Escuchando: siguiente, anterior o repetir…')}
+function cook(id,index){cancelKitchenListening?.();currentId=id;stepIndex=index;const r=db.recipes.find(r=>r.id===id);openOrUpdate(head(r.title)+`<div class="modal-content"><div class="step-progress">PASO ${index+1} DE ${r.steps.length}</div><div class="step">${esc(r.steps[index])}</div><div class="actions"><button ${index===0?'disabled':''} onclick="cook('${id}',${index-1})">← Anterior</button><button class="primary" onclick="${index===r.steps.length-1?'closeModal();toast(\'¡A disfrutar!\')':`cook('${id}',${index+1})`}">${index===r.steps.length-1?'Terminar ✓':'Siguiente →'}</button><button onclick="speak()">◖ Escuchar paso</button><button onclick="listen()">♩ Comando de voz</button></div><p class="note">Comandos: «siguiente», «anterior», «repetir». La disponibilidad del micrófono depende del navegador. Los botones siempre están disponibles.</p><div id="kitchen-status" role="status" aria-live="polite" aria-atomic="true"></div></div>`)}function speak(){cancelKitchenListening?.();if(!('speechSynthesis'in window)){showKitchenStatus('Lectura de voz no disponible en este navegador');return}speechSynthesis.cancel();let s=new SpeechSynthesisUtterance(db.recipes.find(r=>r.id===currentId).steps[stepIndex]);s.lang='es-ES';speechSynthesis.speak(s)}let cancelKitchenListening;
+$('#modal').addEventListener('close', () => {
+  if (!$('#modal').open) cancelKitchenListening?.();
+});
+
+const kitchenRecognitionErrors = {
+  'not-allowed': 'Silk o el navegador no permitió usar el reconocimiento de voz.',
+  'service-not-allowed': 'El navegador no permite usar su servicio de reconocimiento de voz.',
+  'audio-capture': 'El navegador no pudo capturar audio del micrófono.',
+  'no-speech': 'El navegador no detectó ninguna palabra.',
+  'network': 'El servicio de voz informó de un fallo de red.',
+  'aborted': 'El navegador canceló el reconocimiento de voz.',
+  'language-not-supported': 'El servicio de voz no admite el idioma configurado.'
+};
+
+function listen() {
+  if (cancelKitchenListening || !$('#modal[open] #kitchen-status')) return;
+
+  const Recognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+  if (!Recognition) {
+    showKitchenStatus('Este navegador no admite comandos de voz. Usa los botones de pantalla.');
+    return;
+  }
+
+  let recognition;
+  let timer;
+  let capturedAudio = false;
+  const finish = (message, abort = false) => {
+    if (cancelKitchenListening !== cancel) return false;
+    cancelKitchenListening = undefined;
+    clearTimeout(timer);
+    if (abort) recognition?.abort();
+    if (message) showKitchenStatus(message);
+    return true;
+  };
+  const cancel = () => finish('', true);
+  cancelKitchenListening = cancel;
+
+  showKitchenStatus('Intentando activar el micrófono…');
+  try {
+    recognition = new Recognition();
+    recognition.lang = 'es-ES';
+    recognition.onaudiostart = () => {
+      if (cancelKitchenListening !== cancel) return;
+      capturedAudio = true;
+      showKitchenStatus('Capturando audio. Di «siguiente», «anterior» o «repetir».');
+    };
+    recognition.onerror = ({error}) => {
+      const message = kitchenRecognitionErrors[error] || 'El navegador informó de un error de reconocimiento de voz.';
+      finish(error ? `${message} (${error})` : message);
+    };
+    recognition.onend = () => finish(capturedAudio
+      ? 'La captura terminó sin reconocer ningún comando.'
+      : 'El navegador terminó sin confirmar la captura de audio.');
+    recognition.onresult = (event) => {
+      if (!finish() || !$('#modal[open] #kitchen-status')) return;
+      const transcript = event.results[event.resultIndex ?? 0][0].transcript.toLowerCase();
+      const recipe = db.recipes.find(item => item.id === currentId);
+      if (/\bsiguiente\b/.test(transcript)) {
+        cook(currentId, Math.min(recipe.steps.length - 1, stepIndex + 1));
+      } else if (/\banterior\b/.test(transcript)) {
+        cook(currentId, Math.max(0, stepIndex - 1));
+      } else if (/\brepetir\b/.test(transcript)) {
+        showKitchenStatus('Comando «repetir» reconocido.');
+        speak();
+      } else {
+        showKitchenStatus('Se detectó voz, pero no un comando. Prueba «siguiente», «anterior» o «repetir».');
+      }
+    };
+    timer = setTimeout(() => finish(capturedAudio
+      ? 'Tiempo agotado. Se capturó audio, pero no llegó ningún comando.'
+      : 'Tiempo agotado. El navegador no confirmó que empezara a capturar audio.', true), 12000);
+    recognition.start();
+  } catch (error) {
+    finish(`No se pudo iniciar el reconocimiento de voz (${error.name}).`);
+  }
+}
+
 function download(name,text,type){const a=document.createElement('a');a.href=URL.createObjectURL(new Blob([text],{type}));a.download=name;a.click();setTimeout(()=>URL.revokeObjectURL(a.href),1000)}function backup(){download('chefvoz-datos.json',JSON.stringify(db,null,2),'application/json')}function restore(input){const f=input.files[0];if(!f)return;f.text().then(t=>{try{const d=JSON.parse(t);if(!Array.isArray(d.recipes)||!d.plan||!Array.isArray(d.shopping)||d.recipes.some(r=>!r.id||!r.title||!Array.isArray(r.ingredients)||!Array.isArray(r.steps)||!(r.portions>0)))throw Error();if(confirm('¿Sustituir los datos de este dispositivo por los del archivo?')){db={...d,checks:d.checks||{},family:d.family||4};save();render();toast('Datos importados')}}catch{toast('El archivo no es una copia válida de ChefVoz')}})}
 function exportICS(){let lines=['BEGIN:VCALENDAR','VERSION:2.0','PRODID:-//ChefVoz//Menu//ES','CALSCALE:GREGORIAN'];const times={Desayuno:'080000',Comida:'140000',Cena:'210000',Snack:'170000',Postre:'150000',Merienda:'180000'};Object.entries(db.plan).forEach(([k,p])=>{let [date,m]=k.split('_');if(date<dateStr(days()[0])||date>dateStr(days()[6]))return;let r=db.recipes.find(r=>r.id===p.id);if(!r)return;lines.push('BEGIN:VEVENT','UID:'+k+'@chefvoz.local','DTSTAMP:'+new Date().toISOString().replace(/[-:]/g,'').replace(/\.\d{3}/,''),'DTSTART:'+date.replaceAll('-','')+'T'+times[m],'SUMMARY:'+m+' - '+r.title.replace(/[,;\\\n]/g,' '),'DESCRIPTION:'+p.servings+' comensales','END:VEVENT')});lines.push('END:VCALENDAR');download('chefvoz-semana.ics',lines.join('\r\n'),'text/calendar');toast('Calendario descargado. Impórtalo en Google o Apple Calendar.')}
 function settings(){$('#app').innerHTML=title('Tu cocina, a tu manera.','Gestiona tus datos y las conexiones de tu hogar.')+`<div class="panel"><h2>Mi hogar</h2><p>Este recetario funciona sin registro, con datos guardados en este dispositivo.</p><label style="max-width:250px;margin-top:15px">Comensales habituales<input type="number" min="1" value="${db.family}" onchange="db.family=Math.max(1,Number(this.value)||1);save()"></label></div><div class="panel"><h2>Datos y copias de seguridad</h2><a href="./chefvoz-github-pages.zip" download>Descargar aplicación para GitHub Pages ↓</a><p>Exporta tu recetario, menú y compra para llevarlos a otro navegador o guardarlos como copia.</p><div class="actions"><button class="primary" onclick="backup()">↓ Exportar todos mis datos</button><label><button onclick="$('#restore').click()">↑ Importar copia</button><input type="file" id="restore" accept="application/json" hidden onchange="restore(this)"></label></div></div><div class="panel"><h2>Calendarios</h2><p>Exporta el menú semanal en formato .ics e impórtalo en Google Calendar o Apple Calendar.</p><div class="actions"><button onclick="exportICS()">Descargar esta semana</button><a href="https://calendar.google.com" target="_blank" rel="noopener"><button>Abrir Google Calendar ↗</button></a></div><p class="note">La conexión directa con Google aún no está configurada. Requiere un proyecto OAuth de Google autorizado. La exportación .ics no sincroniza cambios automáticamente.</p></div><div class="panel"><h2>Compartir en familia</h2><p>Autenticación, recetas públicas y sincronización entre móviles necesitan un servicio compartido. Esta versión utiliza almacenamiento local; marcar una receta pública solo guarda esa preferencia aquí.</p><p class="note">Preparada para alojamiento estático. La sincronización familiar y el repositorio social quedan pendientes de conectar un proveedor como Supabase, con autenticación y permisos por hogar.</p></div><div class="panel"><h2>Echo Show y voz</h2><p>Activa Modo cocina para botones grandes. Abre una receta y selecciona «Cocinar paso a paso». El reconocimiento de voz utiliza la API del navegador cuando está disponible; no es una skill de Alexa.</p></div>`}
