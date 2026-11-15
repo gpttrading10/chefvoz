@@ -1,0 +1,306 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ChefVoz · Hogares de prueba</title>
+<style>
+  :root { color-scheme: light; font-family: system-ui, sans-serif; color: #20382d; background: #f5f4ed; }
+  * { box-sizing: border-box; }
+  body { margin: 0; padding: 28px 16px; }
+  main { max-width: 34rem; margin: auto; padding: clamp(18px, 5vw, 32px); background: white; border: 1px solid #dddcd1; border-radius: 18px; }
+  h1 { margin: 4px 0 12px; font-size: clamp(1.5rem, 6vw, 2rem); }
+  p { line-height: 1.5; }
+  .tag { color: #38604d; font-weight: 700; margin: 0; }
+  label { display: block; margin: 14px 0; font-weight: 600; }
+  input, button { font: inherit; min-height: 46px; border-radius: 8px; }
+  input { display: block; width: 100%; margin-top: 5px; border: 1px solid #83968a; padding: 8px 10px; }
+  button { border: 0; background: #235c45; color: white; padding: 8px 16px; cursor: pointer; }
+  button:disabled { opacity: .65; }
+  #status:not(:empty) { background: #eaf1e2; padding: 12px; border-radius: 8px; }
+  #identity { overflow-wrap: anywhere; }
+  [hidden] { display: none; }
+  fieldset { min-width: 0; border: 0; padding: 0; margin: 1rem 0; }
+  select { font: inherit; max-width: 100%; min-height: 46px; }
+  li { margin-bottom: 10px; overflow-wrap: anywhere; }
+  a { color: #235c45; }
+</style>
+<script defer src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.57.4/dist/umd/supabase.js"
+        integrity="sha384-sLWJsCmP+Z4Qn+HgF7Hi64Djta4fZMu0fcgi3uUL3GFV/ubx2G86LPOuMf7+ZIyX"
+        crossorigin="anonymous"></script>
+</head>
+<body>
+<main>
+  <p class="tag">ChefVoz · Fase 2B</p>
+  <h1>Hogares de prueba</h1>
+  <p>Inicia sesión con una cuenta de prueba para crear un hogar o aceptar una invitación.</p>
+  <form id="login">
+    <label>URL del proyecto
+      <input id="project" type="url" placeholder="https://tu-proyecto.supabase.co" required>
+    </label>
+    <label>Clave pública de la app
+      <input id="key" placeholder="sb_publishable_…" pattern="sb_publishable_[A-Za-z0-9_\-]+" spellcheck="false" autocomplete="off" required>
+    </label>
+    <label>Correo de la cuenta de prueba
+      <input id="email" type="email" autocomplete="username" required>
+    </label>
+    <label>Contraseña de esa cuenta
+      <input id="password" type="password" autocomplete="current-password" required>
+    </label>
+    <button id="submit" disabled>Iniciar sesión</button>
+  </form>
+  <section id="account" hidden>
+    <p>Cuenta verificada <strong id="identity"></strong></p>
+    <fieldset id="households">
+      <form id="create-house">
+        <label>Nombre del hogar
+          <input id="house-name" maxlength="80" required>
+        </label>
+        <button>Crear hogar</button>
+      </form>
+      <form id="join-house">
+        <label>Código de invitación
+          <input id="invite-code" spellcheck="false" autocapitalize="none" required>
+        </label>
+        <button>Aceptar invitación</button>
+      </form>
+      <hr>
+      <label>Mis hogares <select id="house-picker"></select></label>
+      <p id="house-role"></p>
+      <button id="refresh" type="button">Actualizar hogares</button>
+      <section id="admin" hidden>
+        <form id="invite">
+          <label>Correo de la cuenta invitada
+            <input id="invite-email" type="email" maxlength="254" required>
+          </label>
+          <button>Generar invitación</button>
+        </form>
+        <label id="share" hidden>Código para compartir con la persona invitada
+          <input id="share-code" readonly>
+        </label>
+        <h2>Miembros</h2>
+        <ul id="member-list"></ul>
+      </section>
+    </fieldset>
+    <button id="logout" type="button">Cerrar sesión</button>
+  </section>
+  <p id="status" role="status" aria-live="polite"></p>
+  <p><a href="./">Volver a ChefVoz</a></p>
+</main>
+<script>
+  const field = (id) => document.getElementById(id);
+  const login = field('login');
+  const account = field('account');
+  const submit = field('submit');
+  const logout = field('logout');
+  const status = field('status');
+  let client;
+  let households = [];
+  const picker = field('house-picker');
+  const permissions = {
+    admin: 'Administrador · puede editar el menú y gestionar miembros.',
+    editor: 'Editor del menú · puede editar el menú.',
+    member: 'Miembro · puede consultar el menú.'
+  };
+
+  async function rpc(name, args) {
+    const {data, error} = await client.rpc(name, args);
+    if (error) throw error;
+    return data;
+  }
+
+  async function showHousehold() {
+    field('share').hidden = true;
+    field('share-code').value = '';
+    const list = field('member-list');
+    list.replaceChildren();
+    const household = households.find(row => row.household_id === picker.value);
+    field('house-role').textContent = household ? permissions[household.role] : 'Aún no tienes hogares.';
+    field('admin').hidden = household?.role !== 'admin';
+    if (field('admin').hidden) return;
+
+    const members = await rpc('chefvoz_household_members', {p_household: household.household_id});
+    for (const member of members) {
+      const item = document.createElement('li');
+      item.textContent = `${member.email} · ${permissions[member.role]} `;
+      if (member.role !== 'admin') {
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.textContent = member.role === 'editor' ? 'Pasar a miembro' : 'Dar permiso de edición';
+        button.addEventListener('click', () => houseAction(async () => {
+          await rpc('chefvoz_set_member_role', {
+            p_household: household.household_id,
+            p_member: member.user_id,
+            p_role: member.role === 'editor' ? 'member' : 'editor'
+          });
+          await showHousehold();
+          return 'Permiso actualizado.';
+        }));
+        item.append(button);
+      }
+      list.append(item);
+    }
+  }
+
+  async function loadHouseholds(selected = picker.value) {
+    const {data, error} = await client.from('chefvoz_memberships')
+      .select('household_id,role,chefvoz_households!inner(name)');
+    if (error) throw error;
+    households = data;
+    picker.replaceChildren(...data.map(row => {
+      const option = document.createElement('option');
+      option.value = row.household_id;
+      option.textContent = row.chefvoz_households.name;
+      return option;
+    }));
+    if (data.some(row => row.household_id === selected)) picker.value = selected;
+    await showHousehold();
+  }
+
+  async function houseAction(action) {
+    const panel = field('households');
+    if (!client || panel.disabled || logout.disabled) return;
+    panel.disabled = true;
+    logout.disabled = true;
+    status.textContent = 'Consultando Supabase…';
+    try {
+      status.textContent = await action() || 'Hogar actualizado.';
+    } catch (error) {
+      if (error?.code === 'P0001') {
+        status.textContent = error.message;
+      } else {
+        status.textContent = 'No se pudo completar la operación. Comprueba la conexión y que ejecutaste el SQL de la fase 2B en este proyecto.';
+      }
+    } finally {
+      panel.disabled = false;
+      logout.disabled = false;
+    }
+  }
+
+  function houseForm(id, action) {
+    field(id).addEventListener('submit', event => {
+      event.preventDefault();
+      houseAction(action);
+    });
+  }
+
+  houseForm('create-house', async () => {
+    const name = field('house-name');
+    const id = await rpc('chefvoz_create_household', {p_name: name.value});
+    name.value = '';
+    await loadHouseholds(id);
+    return 'Hogar creado.';
+  });
+
+  houseForm('join-house', async () => {
+    const code = field('invite-code');
+    const value = code.value.trim();
+    if (!/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(value)) {
+      return 'Pega el código completo de la invitación.';
+    }
+    const id = await rpc('chefvoz_accept_invite', {p_code: value});
+    code.value = '';
+    await loadHouseholds(id);
+    return 'Invitación aceptada.';
+  });
+
+  houseForm('invite', async () => {
+    field('share').hidden = true;
+    field('share-code').value = '';
+    const code = await rpc('chefvoz_invite', {
+      p_household: picker.value, p_email: field('invite-email').value
+    });
+    field('share-code').value = code;
+    field('share').hidden = false;
+    return 'Invitación lista. Copia el código y compártelo con la persona invitada. Caduca a los siete días de su emisión.';
+  });
+
+  picker.addEventListener('change', () => houseAction(showHousehold));
+  field('refresh').addEventListener('click', () => houseAction(() => loadHouseholds()));
+
+
+  function authError(error) {
+    switch (error?.code) {
+      case 'invalid_credentials': return 'El correo o la contraseña no coinciden.';
+      case 'email_not_confirmed': return 'La cuenta todavía no está confirmada en Supabase.';
+      default: return 'No se pudo verificar la cuenta. Comprueba la conexión, la URL y la clave pública del proyecto.';
+    }
+  }
+
+  window.addEventListener('DOMContentLoaded', () => {
+    if (window.supabase?.createClient) {
+      submit.disabled = false;
+    } else {
+      status.textContent = 'No se pudo cargar el acceso de Supabase. Comprueba la conexión y vuelve a abrir esta página.';
+    }
+  });
+
+  login.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    if (submit.disabled) return;
+    const project = field('project').value.trim();
+    const key = field('key').value.trim();
+    if (!/^https:\/\/[a-z0-9-]+\.supabase\.co\/?$/i.test(project) ||
+        !/^sb_publishable_[A-Za-z0-9_-]+$/.test(key)) {
+      status.textContent = 'Introduce la URL HTTPS de tu proyecto de Supabase y su clave pública sb_publishable_.';
+      return;
+    }
+
+    submit.disabled = true;
+    status.textContent = 'Verificando la cuenta…';
+    const password = field('password').value;
+    field('password').value = '';
+    try {
+      const attempt = window.supabase.createClient(project, key, {
+        auth: { persistSession: false, autoRefreshToken: false, detectSessionInUrl: false }
+      });
+      const { data, error } = await attempt.auth.signInWithPassword({
+        email: field('email').value.trim(), password
+      });
+      if (error) throw error;
+      client = attempt;
+      field('identity').textContent = data.user.email;
+      login.hidden = true;
+      account.hidden = false;
+      status.textContent = 'Sesión iniciada para la prueba.';
+      logout.focus();
+      await houseAction(() => loadHouseholds());
+    } catch (error) {
+      status.textContent = authError(error);
+    } finally {
+      submit.disabled = false;
+    }
+  });
+
+  logout.addEventListener('click', async () => {
+    if (!client || logout.disabled) return;
+    logout.disabled = true;
+    try {
+      const { error } = await client.auth.signOut({scope: 'local'});
+      if (error) throw error;
+      status.textContent = 'Sesión cerrada.';
+    } catch {
+      status.textContent = 'La sesión se ha descartado en esta página. Supabase no confirmó el cierre.';
+    } finally {
+      client = undefined;
+      households = [];
+      picker.replaceChildren();
+      field('member-list').replaceChildren();
+      field('admin').hidden = true;
+      field('share').hidden = true;
+      for (const id of ['house-name', 'invite-code', 'invite-email', 'share-code', 'house-role']) {
+        const element = field(id);
+        if ('value' in element) element.value = '';
+        else element.textContent = '';
+      }
+      field('identity').textContent = '';
+      field('email').value = '';
+      account.hidden = true;
+      login.hidden = false;
+      logout.disabled = false;
+      field('email').focus();
+    }
+  });
+</script>
+</body>
+</html>
